@@ -22,7 +22,6 @@ ESTABLISHED FACTS — hard canon details established so far (names, rooms, objec
 
 export const generateEpisode = task({
   id: "generate-episode",
-  // Allow longer runs for full episode generation
   maxDuration: 1800,
   run: async (payload: {
     episodeNumber: number;
@@ -93,7 +92,7 @@ Return EXACTLY this format:
 <MEMORY>3-5 sentences: what happened, and the emotional/practical state of the leads at the end</MEMORY>
 <HOOK_TYPE>short phrase naming the cliffhanger device used (e.g. "phone call", "betrayal clue")</HOOK_TYPE>`;
 
-    // Stage 1: the episode (NON-STREAMING — more reliable with custom gateways)
+    // Stage 1: the episode (NON-STREAMING)
     let r1: { content: string; finishReason: string };
     try {
       r1 = await chat(model, system, user1, 12288);
@@ -110,7 +109,6 @@ Return EXACTLY this format:
     }
 
     let body = sanitize(seg(r1.content, "BODY"));
-    // Fallback: if tags missing, treat whole response as body
     if (!body && r1.content.trim().length > 500) {
       body = sanitize(r1.content);
     }
@@ -118,9 +116,9 @@ Return EXACTLY this format:
     let memory = seg(r1.content, "MEMORY");
     const hookType = seg(r1.content, "HOOK_TYPE") || "unknown";
 
-    // continue if cut off
+    // Continue if cut off — up to 3 attempts
     if (body && (r1.finishReason === "length" || isCutOff(body))) {
-      for (let attempt = 0; attempt < 2 && isCutOff(body); attempt++) {
+      for (let attempt = 0; attempt < 3 && isCutOff(body); attempt++) {
         const rc = await chat(
           model,
           MASTER_RULES,
@@ -128,6 +126,9 @@ Return EXACTLY this format:
           4096
         );
         let c = sanitize(seg(rc.content, "CONT"));
+        if (!c && rc.content.trim().length > 20) {
+          c = sanitize(rc.content);
+        }
         if (!c) continue;
         c = stripOverlap(body, c);
         if (isRestart(body, c)) continue;
@@ -144,8 +145,20 @@ Return EXACTLY this format:
         `Raw model output (first 1200 chars):\n${rawPreview}`
       );
     }
+
+    // Soften cut-off rule: if episode is already substantial, accept it
+    // rather than discarding a nearly complete episode
     if (isCutOff(body)) {
-      throw new Error("The episode ended mid-sentence and could not be completed.");
+      if (wordCount(body) >= 1500) {
+        // Soft-close: add a period if missing so downstream is happier
+        if (!/[.!?…"'”’)]$/.test(body.trim())) {
+          body = body.trimEnd() + ".";
+        }
+      } else {
+        throw new Error(
+          `The episode ended mid-sentence and could not be completed. Words=${wordCount(body)}.`
+        );
+      }
     }
 
     // expand if short
@@ -209,7 +222,7 @@ If you find none, return only <CLEAN>clean</CLEAN>.`,
       }
     }
 
-    // Stage 3: premium + state (also non-streaming)
+    // Stage 3: premium + state
     const premiumPrompt = `Here is Episode ${episodeNumber} ("${title}") that was just written:
 
 ${body}
@@ -260,7 +273,6 @@ Return ONLY <STATE>...</STATE>${!memory ? " and <MEMORY>...</MEMORY>" : ""}.`;
         const t = sanitize(seg(r2.content, "PREMIUM_TITLE"));
         if (t) premiumTitle = t;
         premiumBody = polish(seg(r2.content, "PREMIUM_BODY"));
-        // fallback if tags missing
         if (wordCount(premiumBody) < 400 && r2.content.trim().length > 400) {
           premiumBody = polish(r2.content);
         }
