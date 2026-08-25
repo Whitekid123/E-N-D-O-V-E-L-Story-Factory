@@ -1,7 +1,6 @@
 import { task } from "@trigger.dev/sdk";
 import {
   chat,
-  chatStream,
   MASTER_RULES,
   seg,
   sanitize,
@@ -23,6 +22,8 @@ ESTABLISHED FACTS — hard canon details established so far (names, rooms, objec
 
 export const generateEpisode = task({
   id: "generate-episode",
+  // Allow longer runs for full episode generation
+  maxDuration: 1800,
   run: async (payload: {
     episodeNumber: number;
     totalEpisodes: number;
@@ -48,7 +49,6 @@ export const generateEpisode = task({
       fastMode = true,
     } = payload;
 
-    // Sanity check for required env
     if (!process.env.CUSTOM_API_KEY) {
       throw new Error("CUSTOM_API_KEY is missing in Trigger.dev Environment Variables");
     }
@@ -93,16 +93,27 @@ Return EXACTLY this format:
 <MEMORY>3-5 sentences: what happened, and the emotional/practical state of the leads at the end</MEMORY>
 <HOOK_TYPE>short phrase naming the cliffhanger device used (e.g. "phone call", "betrayal clue")</HOOK_TYPE>`;
 
-    // Stage 1: the episode
+    // Stage 1: the episode (NON-STREAMING — more reliable with custom gateways)
     let r1: { content: string; finishReason: string };
     try {
-      r1 = await chatStream(model, system, user1, 12288, () => {});
+      r1 = await chat(model, system, user1, 12288);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(`Model call failed: ${msg}`);
     }
 
+    if (!r1.content || !r1.content.trim()) {
+      throw new Error(
+        `Model returned empty content. finishReason=${r1.finishReason || "none"}. ` +
+        `Check CUSTOM_API_KEY and that model "${model}" is valid on your gateway.`
+      );
+    }
+
     let body = sanitize(seg(r1.content, "BODY"));
+    // Fallback: if tags missing, treat whole response as body
+    if (!body && r1.content.trim().length > 500) {
+      body = sanitize(r1.content);
+    }
     let title = sanitize(seg(r1.content, "TITLE")) || `Episode ${episodeNumber}`;
     let memory = seg(r1.content, "MEMORY");
     const hookType = seg(r1.content, "HOOK_TYPE") || "unknown";
@@ -198,7 +209,7 @@ If you find none, return only <CLEAN>clean</CLEAN>.`,
       }
     }
 
-    // Stage 3: premium + state
+    // Stage 3: premium + state (also non-streaming)
     const premiumPrompt = `Here is Episode ${episodeNumber} ("${title}") that was just written:
 
 ${body}
@@ -240,16 +251,19 @@ Return ONLY <STATE>...</STATE>${!memory ? " and <MEMORY>...</MEMORY>" : ""}.`;
 
     const runPremium = async () => {
       for (let attempt = 0; attempt < 2 && wordCount(premiumBody) < 400; attempt++) {
-        const r2 = await chatStream(
+        const r2 = await chat(
           model,
           `${MASTER_RULES}\n\nSTORY BIBLE:\n${bible}`,
           premiumPrompt,
-          4096,
-          () => {}
+          4096
         );
         const t = sanitize(seg(r2.content, "PREMIUM_TITLE"));
         if (t) premiumTitle = t;
         premiumBody = polish(seg(r2.content, "PREMIUM_BODY"));
+        // fallback if tags missing
+        if (wordCount(premiumBody) < 400 && r2.content.trim().length > 400) {
+          premiumBody = polish(r2.content);
+        }
       }
     };
 
