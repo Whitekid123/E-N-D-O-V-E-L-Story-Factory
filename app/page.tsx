@@ -166,54 +166,100 @@ export default function Home() {
         const number = cur.eps.length + 1;
         if (number > cur.meta.episodes) { addLog('🎉 Story complete — every episode written.'); break; }
         const block = Math.floor((number - 1) / 10) + 1;
-        setLive(''); setPremiumLive('');
-        addLog(`Writing Episode ${number} of ${cur.meta.episodes} (Block ${block})...`);
-        const res = await fetch('/api/episode', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            episodeNumber: number, totalEpisodes: cur.meta.episodes, model: cur.meta.model,
-            bible: cur.bible, blockSpec: blockSpec(cur.blocks, block), storyState: cur.state,
-            memories: cur.eps.slice(-3).map((e) => `Ep${e.number}: ${e.memory}`),
-            recentHooks: cur.eps.slice(-3).map((e) => e.hookType),
-            lastEnding: cur.eps.at(-1)?.body.slice(-1800) || '',
-            fastMode: fast,
-          }),
-        });
-        if (!res.ok || !res.body) throw new Error((await res.json().catch(() => ({}))).error || 'Generation failed');
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-        let final: (Episode & { state: string }) | null = null;
-        let err = '';
-        while (true) {
-          const part = await reader.read();
-          if (part.done) break;
-          buf += decoder.decode(part.value, { stream: true });
-          let nl = buf.indexOf('\n');
-          while (nl >= 0) {
-            const line = buf.slice(0, nl).trim();
-            buf = buf.slice(nl + 1);
-            nl = buf.indexOf('\n');
-            if (!line) continue;
-            try {
-              const ev = JSON.parse(line) as { type: string; text?: string; message?: string; data?: Episode & { state: string } };
-              if (ev.type === 'ping') continue;
-              if (ev.type === 'status') addLog(ev.message || '');
-              else if (ev.type === 'chunk') setLive((t) => t + (ev.text || ''));
-              else if (ev.type === 'body') setLive(ev.text || '');
-              else if (ev.type === 'premium_reset') setPremiumLive('');
-              else if (ev.type === 'premium_chunk') setPremiumLive((t) => t + (ev.text || ''));
-              else if (ev.type === 'done') final = ev.data || null;
-              else if (ev.type === 'error') err = ev.message || 'Generation failed';
-            } catch { /* incomplete line */ }
+        
+        let success = false;
+        let attempts = 0;
+        let lastError = '';
+
+        while (!success && attempts < 3) {
+          attempts += 1;
+          if (stopRef.current) break;
+
+          try {
+            setLive(''); setPremiumLive('');
+            if (attempts > 1) {
+              addLog(`[Attempt ${attempts}/3] Retrying Episode ${number}...`);
+            } else {
+              addLog(`Writing Episode ${number} of ${cur.meta.episodes} (Block ${block})...`);
+            }
+
+            const res = await fetch('/api/episode', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                episodeNumber: number, totalEpisodes: cur.meta.episodes, model: cur.meta.model,
+                bible: cur.bible, blockSpec: blockSpec(cur.blocks, block), storyState: cur.state,
+                memories: cur.eps.slice(-3).map((e) => `Ep${e.number}: ${e.memory}`),
+                recentHooks: cur.eps.slice(-3).map((e) => e.hookType),
+                lastEnding: cur.eps.at(-1)?.body.slice(-1800) || '',
+                fastMode: fast,
+              }),
+            });
+
+            if (!res.ok) {
+              let errorMsg = `Server error: ${res.status}`;
+              try {
+                const errData = await res.json();
+                if (errData.error) errorMsg = errData.error;
+              } catch {
+                if (res.status === 504) errorMsg = 'Server timeout (generation took too long).';
+              }
+              throw new Error(errorMsg);
+            }
+            if (!res.body) throw new Error('No stream returned');
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            let final: (Episode & { state: string }) | null = null;
+            let err = '';
+
+            while (true) {
+              const part = await reader.read();
+              if (part.done) break;
+              buf += decoder.decode(part.value, { stream: true });
+              let nl = buf.indexOf('\n');
+              while (nl >= 0) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                nl = buf.indexOf('\n');
+                if (!line) continue;
+                try {
+                  const ev = JSON.parse(line) as { type: string; text?: string; message?: string; data?: Episode & { state: string } };
+                  if (ev.type === 'ping') continue;
+                  if (ev.type === 'status') addLog(ev.message || '');
+                  else if (ev.type === 'chunk') setLive((t) => t + (ev.text || ''));
+                  else if (ev.type === 'body') setLive(ev.text || '');
+                  else if (ev.type === 'premium_reset') setPremiumLive('');
+                  else if (ev.type === 'premium_chunk') setPremiumLive((t) => t + (ev.text || ''));
+                  else if (ev.type === 'done') final = ev.data || null;
+                  else if (ev.type === 'error') err = ev.message || 'Generation failed';
+                } catch { /* incomplete line */ }
+              }
+            }
+
+            if (err) throw new Error(err);
+            if (!final) throw new Error('Stream ended without a result.');
+
+            const ep: Episode = { number, title: final.title, body: final.body, premiumTitle: final.premiumTitle, premiumBody: final.premiumBody, memory: final.memory, hookType: final.hookType, episodeWords: final.episodeWords, premiumWords: final.premiumWords };
+            update({ ...cur, eps: [...cur.eps, ep], state: final.state || cur.state });
+            addLog(`Episode ${number} done ✓  ${final.episodeWords} words + premium ${final.premiumWords} words. Memory updated.`);
+
+            if (number % 10 === 0 || number === cur.meta.episodes) await buildDocx(block);
+            
+            success = true; 
+
+          } catch (err: any) {
+            lastError = err.message || String(err);
+            if (attempts < 3 && !stopRef.current) {
+               addLog(`WARNING: ${lastError} - Retrying in 5 seconds...`);
+               await new Promise((r) => setTimeout(r, 5000));
+            }
           }
         }
-        if (err) throw new Error(err);
-        if (!final) throw new Error('Stream ended without a result — click Write again to retry this episode.');
-        const ep: Episode = { number, title: final.title, body: final.body, premiumTitle: final.premiumTitle, premiumBody: final.premiumBody, memory: final.memory, hookType: final.hookType, episodeWords: final.episodeWords, premiumWords: final.premiumWords };
-        update({ ...cur, eps: [...cur.eps, ep], state: final.state || cur.state });
-        addLog(`Episode ${number} done ✓  ${final.episodeWords} words + premium ${final.premiumWords} words. Memory updated.`);
-        if (number % 10 === 0 || number === cur.meta.episodes) await buildDocx(block);
+
+        if (!success) {
+          throw new Error(`Failed to generate Episode ${number} after 3 attempts. Last error: ${lastError}`);
+        }
       }
     } catch (e) { addLog(`ERROR: ${e instanceof Error ? e.message : String(e)} — progress saved; click Write to resume.`); }
     finally { setBusy(false); setLive(''); setPremiumLive(''); }
