@@ -48,6 +48,11 @@ export const generateEpisode = task({
       fastMode = true,
     } = payload;
 
+    // Sanity check for required env
+    if (!process.env.CUSTOM_API_KEY) {
+      throw new Error("CUSTOM_API_KEY is missing in Trigger.dev Environment Variables");
+    }
+
     const system = `${MASTER_RULES}
 
 STORY BIBLE (canon — never contradict it):
@@ -89,7 +94,13 @@ Return EXACTLY this format:
 <HOOK_TYPE>short phrase naming the cliffhanger device used (e.g. "phone call", "betrayal clue")</HOOK_TYPE>`;
 
     // Stage 1: the episode
-    const r1 = await chatStream(model, system, user1, 12288, () => {});
+    let r1: { content: string; finishReason: string };
+    try {
+      r1 = await chatStream(model, system, user1, 12288, () => {});
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`Model call failed: ${msg}`);
+    }
 
     let body = sanitize(seg(r1.content, "BODY"));
     let title = sanitize(seg(r1.content, "TITLE")) || `Episode ${episodeNumber}`;
@@ -102,12 +113,7 @@ Return EXACTLY this format:
         const rc = await chat(
           model,
           MASTER_RULES,
-          `An episode was cut off mid-sentence by an output limit. It stopped here:
-
-...
-${body.slice(-1200)}
-
-Continue from EXACTLY where it stops, beginning by completing the interrupted word or sentence. Do not repeat any text above, do not restart the episode, do not add headings. Finish the episode naturally on its cliffhanger. Return ONLY the continuation inside <CONT>...</CONT>.`,
+          `An episode was cut off mid-sentence by an output limit. It stopped here:\n\n...\n${body.slice(-1200)}\n\nContinue from EXACTLY where it stops, beginning by completing the interrupted word or sentence. Do not repeat any text above, do not restart the episode, do not add headings. Finish the episode naturally on its cliffhanger. Return ONLY the continuation inside <CONT>...</CONT>.`,
           4096
         );
         let c = sanitize(seg(rc.content, "CONT"));
@@ -119,7 +125,13 @@ Continue from EXACTLY where it stops, beginning by completing the interrupted wo
     }
 
     if (!body || wordCount(body) < 800) {
-      throw new Error("The model could not finish the episode.");
+      const rawPreview = (r1.content || "(empty)").slice(0, 1200);
+      const words = wordCount(body);
+      throw new Error(
+        `The model could not finish the episode. ` +
+        `Parsed BODY words=${words}. finishReason=${r1.finishReason || "none"}. ` +
+        `Raw model output (first 1200 chars):\n${rawPreview}`
+      );
     }
     if (isCutOff(body)) {
       throw new Error("The episode ended mid-sentence and could not be completed.");
@@ -130,9 +142,7 @@ Continue from EXACTLY where it stops, beginning by completing the interrupted wo
       const ex = await chat(
         model,
         MASTER_RULES,
-        `This episode is only ${wordCount(body)} words; the standard is 2,000-2,500. Rewrite it in full at proper length, adding only meaningful material (deeper scenes, interiority, sharper dialogue, consequences). Keep every event and beat. No padding or repetition. Return only <BODY>...</BODY>.
-
-${body}`,
+        `This episode is only ${wordCount(body)} words; the standard is 2,000-2,500. Rewrite it in full at proper length, adding only meaningful material (deeper scenes, interiority, sharper dialogue, consequences). Keep every event and beat. No padding or repetition. Return only <BODY>...</BODY>.\n\n${body}`,
         12288
       );
       const b2 = sanitize(seg(ex.content, "BODY"));
