@@ -10,7 +10,7 @@ ABSOLUTE LAWS:
 5. HOOKS. The first 100-200 words must grip. End on a natural cliffhanger woven into the final scene - never labeled "Cliffhanger", and vary the device between episodes.
 6. PREMIUM EXCLUSIVE VALUE. The premium mini story must have an exclusive reason to exist - another POV, a parallel scene, a private conversation the protagonist never hears, a hidden consequence, or a clue readers get first. Never a summary of the episode.
 7. PACING. Every episode changes something: information, emotion, risk, relationship, or decision. Romance and reveals advance only at the stage the block plan permits. Major events get aftermath.
-8. STYLE. Immersive in-world prose. Show, don't tell. Character-specific dialogue. Visual, cinematic scenes. No author notes or meta commentary inside story text.
+8. STYLE. Immersive in-world prose. Show, don't tell. Character-specific dialogue. Visual, cinematic scenes. No author notes or meta commentary inside story text. Never use markdown formatting (no asterisks for italics, no underscores, no # headings, no // comments). Write plain prose only.
 9. ORIGINALITY. Every story is a fresh concept with its own identity.`;
 
 export function wordCount(text: string): number {
@@ -36,11 +36,36 @@ export function seg(text: string, name: string): string {
 }
 
 export function sanitize(text: string): string {
-  return (text || '')
+  let t = text || '';
+
+  // Unescape common JSON/model artifacts
+  t = t
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '')
+    .replace(/\\t/g, ' ')
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, '\\');
+
+  // Strip XML-ish tags and label lines
+  t = t
     .replace(/<\/?[A-Z][A-Z_]*>/g, '')
-    .replace(/^\s*(TITLE|BODY|PREMIUM_TITLE|PREMIUM_BODY|MEMORY|HOOK_TYPE|CONT)\s*:?\s*$/gim, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/^\s*(TITLE|BODY|PREMIUM_TITLE|PREMIUM_BODY|MEMORY|HOOK_TYPE|CONT)\s*:?\s*$/gim, '');
+
+  // Remove markdown emphasis left in by the model (*italic*, **bold**, _italic_)
+  t = t
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/_([^_]+)_/g, '$1');
+
+  // Remove // comment-like junk and stray backslashes
+  t = t
+    .replace(/(^|\s)\/\/[^\n]*/g, '$1')
+    .replace(/\\+/g, '');
+
+  // Collapse excess blank lines
+  t = t.replace(/\n{3,}/g, '\n\n').trim();
+  return t;
 }
 
 export function dedupeParagraphs(text: string): string {
