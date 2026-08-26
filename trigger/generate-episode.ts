@@ -10,6 +10,7 @@ import {
   isCutOff,
   wordCount,
 } from "@/lib/ai";
+import { isSupabaseConfigured, upsertEpisode, updateStoryState } from "@/lib/supabase-store";
 
 const STATE_FORMAT = `TIMELINE — where we are in story-world time
 CHARACTER STATUS — each recurring character: location, condition, emotional state, current goal
@@ -34,6 +35,7 @@ export const generateEpisode = task({
     recentHooks?: string[];
     lastEnding?: string;
     fastMode?: boolean;
+    storyId?: string;
   }) => {
     const {
       episodeNumber,
@@ -46,6 +48,7 @@ export const generateEpisode = task({
       recentHooks = [],
       lastEnding = "",
       fastMode = true,
+      storyId = "",
     } = payload;
 
     if (!process.env.CUSTOM_API_KEY) {
@@ -92,7 +95,6 @@ Return EXACTLY this format:
 <MEMORY>3-5 sentences: what happened, and the emotional/practical state of the leads at the end</MEMORY>
 <HOOK_TYPE>short phrase naming the cliffhanger device used (e.g. "phone call", "betrayal clue")</HOOK_TYPE>`;
 
-    // Stage 1: the episode (NON-STREAMING)
     let r1: { content: string; finishReason: string };
     try {
       r1 = await chat(model, system, user1, 12288);
@@ -116,7 +118,6 @@ Return EXACTLY this format:
     let memory = seg(r1.content, "MEMORY");
     const hookType = seg(r1.content, "HOOK_TYPE") || "unknown";
 
-    // Continue if cut off — up to 3 attempts
     if (body && (r1.finishReason === "length" || isCutOff(body))) {
       for (let attempt = 0; attempt < 3 && isCutOff(body); attempt++) {
         const rc = await chat(
@@ -146,11 +147,8 @@ Return EXACTLY this format:
       );
     }
 
-    // Soften cut-off rule: if episode is already substantial, accept it
-    // rather than discarding a nearly complete episode
     if (isCutOff(body)) {
       if (wordCount(body) >= 1500) {
-        // Soft-close: add a period if missing so downstream is happier
         if (!/[.!?…"'”’)]$/.test(body.trim())) {
           body = body.trimEnd() + ".";
         }
@@ -161,7 +159,6 @@ Return EXACTLY this format:
       }
     }
 
-    // expand if short
     if (wordCount(body) < 1850) {
       const ex = await chat(
         model,
@@ -175,7 +172,6 @@ Return EXACTLY this format:
       }
     }
 
-    // Stage 2: continuity (skipped in fastMode)
     if (!fastMode) {
       const rr = await chat(
         model,
@@ -198,7 +194,7 @@ ${blockSpec}
 EPISODE:
 ${body}
 
-If you find issues, return ONLY <PATCHES>[{"find":"an exact sentence fragment copied from the episode","replace":"the corrected fragment"}]</PATCHES> — 1 to 4 patches, each replacing the smallest possible fragment, matching the episode text exactly.
+If you find issues, return ONLY <PATCHES>[{\"find\":\"an exact sentence fragment copied from the episode\",\"replace\":\"the corrected fragment\"}]</PATCHES> — 1 to 4 patches, each replacing the smallest possible fragment, matching the episode text exactly.
 If you find none, return only <CLEAN>clean</CLEAN>.`,
         1000
       );
@@ -222,7 +218,6 @@ If you find none, return only <CLEAN>clean</CLEAN>.`,
       }
     }
 
-    // Stage 3: premium + state
     const premiumPrompt = `Here is Episode ${episodeNumber} ("${title}") that was just written:
 
 ${body}
@@ -296,6 +291,26 @@ Return ONLY <STATE>...</STATE>${!memory ? " and <MEMORY>...</MEMORY>" : ""}.`;
       throw new Error("The episode was written but the premium mini story failed.");
     }
 
+    const finalState = newState || storyState;
+    const episodeWords = wordCount(body);
+    const premiumWords = wordCount(premiumBody);
+
+    if (storyId && isSupabaseConfigured()) {
+      await upsertEpisode({
+        story_id: storyId,
+        number: episodeNumber,
+        title,
+        body,
+        premium_title: premiumTitle,
+        premium_body: premiumBody,
+        memory,
+        hook_type: hookType,
+        episode_words: episodeWords,
+        premium_words: premiumWords,
+      });
+      await updateStoryState(storyId, finalState);
+    }
+
     return {
       title,
       body,
@@ -303,9 +318,9 @@ Return ONLY <STATE>...</STATE>${!memory ? " and <MEMORY>...</MEMORY>" : ""}.`;
       premiumBody,
       memory,
       hookType,
-      state: newState || storyState,
-      episodeWords: wordCount(body),
-      premiumWords: wordCount(premiumBody),
+      state: finalState,
+      episodeWords,
+      premiumWords,
     };
   },
 });
