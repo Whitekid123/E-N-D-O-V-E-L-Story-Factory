@@ -166,7 +166,7 @@ export default function Home() {
         const number = cur.eps.length + 1;
         if (number > cur.meta.episodes) { addLog('🎉 Story complete — every episode written.'); break; }
         const block = Math.floor((number - 1) / 10) + 1;
-        
+
         let success = false;
         let attempts = 0;
         let lastError = '';
@@ -205,54 +205,72 @@ export default function Home() {
               }
               throw new Error(errorMsg);
             }
-            if (!res.body) throw new Error('No stream returned');
 
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buf = '';
+            const startData = await res.json() as { runId?: string; status?: string; error?: string };
+            if (!startData.runId) throw new Error(startData.error || 'No runId returned from server');
+
+            addLog(`Queued (run ${startData.runId.slice(0, 14)}…) — generating in background…`);
+            setLive('Generating in the background… this usually takes 2–5 minutes. Please wait.');
+
             let final: (Episode & { state: string }) | null = null;
-            let err = '';
+            const maxPolls = 100; // ~8 min at 5s
+            for (let poll = 0; poll < maxPolls; poll += 1) {
+              if (stopRef.current) throw new Error('Stopped by user');
+              await new Promise((r) => setTimeout(r, 5000));
 
-            while (true) {
-              const part = await reader.read();
-              if (part.done) break;
-              buf += decoder.decode(part.value, { stream: true });
-              let nl = buf.indexOf('\n');
-              while (nl >= 0) {
-                const line = buf.slice(0, nl).trim();
-                buf = buf.slice(nl + 1);
-                nl = buf.indexOf('\n');
-                if (!line) continue;
-                try {
-                  const ev = JSON.parse(line) as { type: string; text?: string; message?: string; data?: Episode & { state: string } };
-                  if (ev.type === 'ping') continue;
-                  if (ev.type === 'status') addLog(ev.message || '');
-                  else if (ev.type === 'chunk') setLive((t) => t + (ev.text || ''));
-                  else if (ev.type === 'body') setLive(ev.text || '');
-                  else if (ev.type === 'premium_reset') setPremiumLive('');
-                  else if (ev.type === 'premium_chunk') setPremiumLive((t) => t + (ev.text || ''));
-                  else if (ev.type === 'done') final = ev.data || null;
-                  else if (ev.type === 'error') err = ev.message || 'Generation failed';
-                } catch { /* incomplete line */ }
+              const statusRes = await fetch(`/api/episode/status?runId=${encodeURIComponent(startData.runId)}`);
+              const statusData = await statusRes.json() as {
+                status?: string;
+                output?: Episode & { state: string };
+                error?: string;
+              };
+
+              if (!statusRes.ok) {
+                throw new Error(statusData.error || `Status check failed (${statusRes.status})`);
               }
+
+              if (statusData.status === 'COMPLETED') {
+                if (!statusData.output?.body) throw new Error('Run completed but output is missing');
+                final = statusData.output;
+                break;
+              }
+
+              if (statusData.status === 'FAILED') {
+                throw new Error(statusData.error || 'Background generation failed');
+              }
+
+              // Still running
+              if (poll > 0 && poll % 6 === 0) {
+                addLog(`Still writing Episode ${number}… (~${Math.round((poll * 5) / 60)} min elapsed)`);
+              }
+              setLive(`Generating in the background… ~${Math.round((poll * 5) / 60)} min elapsed. Please wait.`);
             }
 
-            if (err) throw new Error(err);
-            if (!final) throw new Error('Stream ended without a result.');
+            if (!final) throw new Error('Timed out waiting for background generation.');
 
-            const ep: Episode = { number, title: final.title, body: final.body, premiumTitle: final.premiumTitle, premiumBody: final.premiumBody, memory: final.memory, hookType: final.hookType, episodeWords: final.episodeWords, premiumWords: final.premiumWords };
+            const ep: Episode = {
+              number,
+              title: final.title,
+              body: final.body,
+              premiumTitle: final.premiumTitle,
+              premiumBody: final.premiumBody,
+              memory: final.memory,
+              hookType: final.hookType,
+              episodeWords: final.episodeWords,
+              premiumWords: final.premiumWords,
+            };
             update({ ...cur, eps: [...cur.eps, ep], state: final.state || cur.state });
             addLog(`Episode ${number} done ✓  ${final.episodeWords} words + premium ${final.premiumWords} words. Memory updated.`);
 
             if (number % 10 === 0 || number === cur.meta.episodes) await buildDocx(block);
-            
-            success = true; 
+
+            success = true;
 
           } catch (err: any) {
             lastError = err.message || String(err);
             if (attempts < 3 && !stopRef.current) {
-               addLog(`WARNING: ${lastError} - Retrying in 5 seconds...`);
-               await new Promise((r) => setTimeout(r, 5000));
+              addLog(`WARNING: ${lastError} - Retrying in 5 seconds...`);
+              await new Promise((r) => setTimeout(r, 5000));
             }
           }
         }
@@ -466,21 +484,13 @@ export default function Home() {
           </section>
         </div>
 
-        {busy && (live || premiumLive) && (
+        {busy && live && (
           <section className="card border-gold-600/40 p-6 mt-6 fade-up">
             <div className="flex items-center gap-3 mb-4">
               <span className="pulse-dot" />
-              <div className="sec !text-cream-300">Writing live · {countWords(stripPreview(live, '</BODY>')).toLocaleString()} words</div>
+              <div className="sec !text-cream-300">Background generation in progress</div>
             </div>
-            <div ref={liveRef} className="max-h-96 overflow-y-auto">
-              {live && <div className="manuscript drop-cap text-cream-300/90">{stripPreview(live, '</BODY>')}<span className="caret" /></div>}
-              {premiumLive && (
-                <div className="mt-6 border-l-2 border-gold-600 pl-5">
-                  <div className="sec mb-2">Premium Mini Story</div>
-                  <div className="manuscript text-cream-300/90">{stripPreview(premiumLive, '</PREMIUM_BODY>')}</div>
-                </div>
-              )}
-            </div>
+            <p className="text-sm text-cream-400">{live}</p>
           </section>
         )}
 
