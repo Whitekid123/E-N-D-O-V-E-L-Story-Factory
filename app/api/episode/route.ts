@@ -10,7 +10,6 @@ export async function POST(req: Request) {
     const input = await req.json();
     const count = Math.max(1, Math.min(Number(input.count) || 1, 20));
 
-    // Multi-episode cloud batch — keeps running if the browser closes
     if (count > 1) {
       const handle = await tasks.trigger<typeof generateEpisodesBatch>(
         "generate-episodes-batch",
@@ -26,6 +25,7 @@ export async function POST(req: Request) {
           recentHooks: input.recentHooks,
           lastEnding: input.lastEnding,
           fastMode: input.fastMode !== false,
+          storyId: input.storyId,
         }
       );
 

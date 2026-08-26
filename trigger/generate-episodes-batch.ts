@@ -1,5 +1,6 @@
 import { task } from "@trigger.dev/sdk";
 import { generateEpisode } from "./generate-episode";
+import { isSupabaseConfigured, upsertEpisode, updateStoryState } from "@/lib/supabase-store";
 
 function blockSpec(text: string, n: number): string {
   const m = text.match(new RegExp(`<BLOCK_${n}>([\\s\\S]*?)</BLOCK_${n}>`, "i"));
@@ -9,10 +10,10 @@ function blockSpec(text: string, n: number): string {
 /**
  * Long-running cloud batch: writes several episodes in sequence.
  * Continues even if the user closes the website.
+ * When storyId + Supabase env are set, each episode is saved immediately.
  */
 export const generateEpisodesBatch = task({
   id: "generate-episodes-batch",
-  // Up to 2 hours — enough for ~10–20 episodes depending on model speed
   maxDuration: 7200,
   run: async (payload: {
     startEpisode: number;
@@ -26,9 +27,12 @@ export const generateEpisodesBatch = task({
     recentHooks?: string[];
     lastEnding?: string;
     fastMode?: boolean;
+    storyId?: string;
   }) => {
     const count = Math.max(1, Math.min(payload.count || 1, 20));
     const start = Math.max(1, payload.startEpisode || 1);
+    const storyId = payload.storyId || "";
+    const canSave = Boolean(storyId && isSupabaseConfigured());
 
     const episodes: Array<{
       number: number;
@@ -54,7 +58,6 @@ export const generateEpisodesBatch = task({
       const block = Math.floor((episodeNumber - 1) / 10) + 1;
       const spec = blockSpec(payload.blocks, block);
 
-      // Run the existing single-episode task and wait for it
       const result = await generateEpisode.triggerAndWait({
         episodeNumber,
         totalEpisodes: payload.totalEpisodes,
@@ -73,13 +76,13 @@ export const generateEpisodesBatch = task({
           typeof result.error === "string"
             ? result.error
             : (result.error as { message?: string })?.message || "unknown error";
-        // Return what we finished so the user still gets partial progress
         return {
           episodes,
           state,
           stoppedAt: episodeNumber,
           error: `Episode ${episodeNumber} failed: ${errMsg}`,
           partial: true,
+          savedToSupabase: canSave,
         };
       }
 
@@ -96,17 +99,34 @@ export const generateEpisodesBatch = task({
         premiumWords: out.premiumWords,
       });
 
-      // Carry continuity into the next episode
       state = out.state || state;
       memories = [...memories, `Ep${episodeNumber}: ${out.memory}`].slice(-5);
       hooks = [...hooks, out.hookType].slice(-5);
       lastEnding = (out.body || "").slice(-1800);
+
+      if (canSave) {
+        await upsertEpisode({
+          story_id: storyId,
+          number: episodeNumber,
+          title: out.title,
+          body: out.body,
+          premium_title: out.premiumTitle,
+          premium_body: out.premiumBody,
+          memory: out.memory,
+          hook_type: out.hookType,
+          episode_words: out.episodeWords,
+          premium_words: out.premiumWords,
+        });
+        await updateStoryState(storyId, state);
+      }
     }
 
     return {
       episodes,
       state,
       partial: false,
+      savedToSupabase: canSave,
+      storyId: storyId || null,
     };
   },
 });
